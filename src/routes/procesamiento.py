@@ -10,15 +10,16 @@ import matplotlib.pyplot as plt
 import io
 import openpyxl.drawing.image
 from werkzeug.utils import secure_filename
+import traceback
 
-procesamiento_bp = Blueprint('procesamiento', __name__)
+procesamiento_bp = Blueprint("procesamiento", __name__)
 
 GEOAPIFY_API_KEY = "65de779bc48c42d8a1208a5f5e9320b4"
 
 def geocode_address_geoapify(address):
     url = f"https://api.geoapify.com/v1/geocode/search?text={address}&apiKey={GEOAPIFY_API_KEY}"
     try:
-        response = requests.get(url)
+        response = requests.get(url )
         response.raise_for_status()
         data = response.json()
         if data and data["features"]:
@@ -35,7 +36,11 @@ def geocode_address_geoapify(address):
         return None, None
 
 def geocode_addresses(df):
-    df["Direccion_Completa"] = df["Domicilio"] + ", " + df["Localidad"] + ", " + df["Provincia"]
+    # Handle 'Provincia' column dynamically
+    if "Provincia" in df.columns:
+        df["Direccion_Completa"] = df["Domicilio"] + ", " + df["Localidad"] + ", " + df["Provincia"]
+    else:
+        df["Direccion_Completa"] = df["Domicilio"] + ", " + df["Localidad"]
     
     latitudes = []
     longitudes = []
@@ -57,24 +62,32 @@ def geocode_addresses(df):
     return df_geocoded
 
 def unify_data(df_clientes, df_ventas):
-    # Process sales data
-    df_ventas_pivot = df_ventas.pivot_table(
-        index="Cliente", 
-        columns="Producto", 
-        values="Importe", 
-        aggfunc="sum", 
-        fill_value=0
-    ).reset_index()
-    
-    df_ventas_pivot.columns.name = None
-        # The 'Cliente' column from df_ventas is already the correct one for merging
-    # No need to rename it to 'Cliente_Ventas' as it will be used directly for merging
-    
-    # Calculate total annual sales
-    df_ventas_pivot["Venta_Total_Anual"] = df_ventas_pivot.drop(columns=["Cliente_Ventas"], errors="ignore").sum(axis=1)
+    # Identify month columns (assuming they are 'Ene', 'Feb', 'Mar', etc.)
+    month_columns = [col for col in df_ventas.columns if col in ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']]
+    if 'Importe PS' in df_ventas.columns:
+        month_columns.append('Importe PS')
+    elif 'IMPORTE' in df_ventas.columns:
+        month_columns.append('IMPORTE')
+
+    # Convert month columns to numeric, coercing errors to NaN
+    for col in month_columns:
+        df_ventas[col] = pd.to_numeric(df_ventas[col], errors='coerce').fillna(0)
+
+    # Sum monthly sales for each client
+    df_ventas_grouped = df_ventas.groupby("Cliente")[month_columns].sum().reset_index()
+
+    # If 'Importe PS' or 'IMPORTE' exists, use it as Venta_Total_Anual
+    if 'Importe PS' in df_ventas.columns:
+        df_ventas_grouped["Venta_Total_Anual"] = df_ventas_grouped["Importe PS"]
+    elif 'IMPORTE' in df_ventas.columns:
+        df_ventas_grouped["Venta_Total_Anual"] = df_ventas_grouped["IMPORTE"]
+    else:
+        df_ventas_grouped["Venta_Total_Anual"] = df_ventas_grouped[month_columns].sum(axis=1)
+
+
     
     # Merge with clients data
-    df_unificado = pd.merge(df_clientes, df_ventas_pivot, left_on="Razón Social", right_on="Cliente", how="left")
+    df_unificado = pd.merge(df_clientes, df_ventas_grouped, left_on="Razón Social", right_on="Cliente", how="left")
     
     # Fill NaN values
     df_unificado["Venta_Total_Anual"] = df_unificado["Venta_Total_Anual"].fillna(0)
@@ -175,8 +188,12 @@ def create_dashboard_sheet(df, writer, chart_path):
     dashboard_df = pd.DataFrame(dashboard_data, columns=["Métrica", "Valor"])
     dashboard_df.to_excel(writer, sheet_name="Dashboard", index=False)
 
-@procesamiento_bp.route('/procesar', methods=['POST'])
+@procesamiento_bp.route("/procesar", methods=["POST"])
 def procesar_datos():
+    print("\n--- Inicio de procesar_datos ---")
+    print(f"Método de solicitud: {request.method}")
+    print(f"Archivos recibidos: {list(request.files.keys())}")
+    print(f"Datos de formulario recibidos: {list(request.form.keys())}")
     try:
         # Check if files are present
         if 'archivo_clientes' not in request.files or 'archivo_ventas' not in request.files:
@@ -203,8 +220,16 @@ def procesar_datos():
         df_clientes = pd.read_excel(clientes_path)
         df_ventas = pd.read_excel(ventas_path, sheet_name="MIX POR CLIENTE")
         
+        # Rename 'Unnamed: 0' to 'Cliente' if it exists
+        if 'Unnamed: 0' in df_ventas.columns:
+            df_ventas = df_ventas.rename(columns={'Unnamed: 0': 'Cliente'})
+        
+        print("Columnas de df_clientes después de la lectura:", df_clientes.columns.tolist())
+        print("Columnas de df_ventas después de la lectura:", df_ventas.columns.tolist())
+        
         # Process data
         df_unificado = unify_data(df_clientes, df_ventas)
+        print("Columnas de df_unificado después de unify_data:", df_unificado.columns.tolist())
         df_clasificado = clasificar_abc(df_unificado)
         
         # Calculate frequency and priority
@@ -227,12 +252,19 @@ def procesar_datos():
             df_clustered.to_excel(writer, sheet_name="Resultados", index=False)
             create_dashboard_sheet(df_clustered, writer, chart_path)
 
+            # Insert chart into dashboard
+            worksheet = writer.sheets["Dashboard"]
+            img = openpyxl.drawing.image.Image(chart_path)
+            img.anchor = "D2"  # Position of the chart
+            worksheet.add_image(img)
+
         
-        return send_file(output_path, as_attachment=True, download_name='resultados_procesados.xlsx')
+        return send_file(output_path, as_attachment=True, download_name="resultados_procesados.xlsx")
         
     except Exception as e:
+        print("Error en procesar_datos:", e)
+        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
-
 
 
 def generate_abc_sales_chart(df, output_path):
@@ -248,13 +280,5 @@ def generate_abc_sales_chart(df, output_path):
     plt.savefig(output_path)
     plt.close()
 
-
-
-
-    # Insert chart into dashboard
-    worksheet = writer.sheets["Dashboard"]
-    img = openpyxl.drawing.image.Image(chart_path)
-    img.anchor = "D2"  # Position of the chart
-    worksheet.add_image(img)
 
 
