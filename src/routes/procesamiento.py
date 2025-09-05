@@ -58,6 +58,11 @@ def geocode_addresses(df):
 
 def unify_data(df_clientes, df_ventas):
     # Process sales data
+    # Limpiar la columna 'Importe' antes de pivotar
+    if 'Importe' in df_ventas.columns:
+        df_ventas['Importe'] = df_ventas['Importe'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+        df_ventas['Importe'] = pd.to_numeric(df_ventas['Importe'], errors='coerce')
+
     df_ventas_pivot = df_ventas.pivot_table(
         index="Cliente", 
         columns="Producto", 
@@ -201,7 +206,7 @@ def procesar_datos():
         
         # Read Excel files
         df_clientes = pd.read_excel(clientes_path)
-        df_ventas = pd.read_excel(ventas_path, sheet_name="MIX POR CLIENTE")
+        df_ventas = pd.read_excel(ventas_path, sheet_name="MIX POR CLIENTE", dtype={"Importe": str})
         
         # Process data
         df_unificado = unify_data(df_clientes, df_ventas)
