@@ -23,7 +23,7 @@ BASE_LNG = -58.4  # Ejemplo: Longitud de Buenos Aires
 def geocode_address_geoapify(address):
     url = f"https://api.geoapify.com/v1/geocode/search?text={address}&apiKey={GEOAPIFY_API_KEY}"
     try:
-        response = requests.get(url)
+        response = requests.get(url )
         response.raise_for_status()
         data = response.json()
         if data and data["features"]:
@@ -117,7 +117,6 @@ def calcular_score_oportunidad(row):
         score += 10
 
     # Factor 2: Segmento (30%)
-    # Asumo que la columna \'Segmento\' existe en df_clientes
     segmento = row.get("Segmento", "Otros/Sin datos")
     if segmento == "Distribuidor A":
         score += 30
@@ -131,7 +130,6 @@ def calcular_score_oportunidad(row):
         score += 10
 
     # Factor 3: Rubro (20%)
-    # Asumo que la columna \'Rubro\' existe en df_clientes
     rubro = row.get("Rubro", "Otros")
     if rubro == "Industrial":
         score += 20
@@ -193,7 +191,6 @@ def calcular_prioridad_final(row):
         distancia_desde_base = calcular_distancia(BASE_LAT, BASE_LNG, row["Latitud"], row["Longitud"])
 
     # Normalización de distancia: Inversa normalizada
-    # Evitar división por cero o valores muy pequeños que inflen el score
     if distancia_desde_base == 0:
         distancia_norm = 1.0 # Si está en la base, score máximo
     else:
@@ -201,7 +198,6 @@ def calcular_prioridad_final(row):
 
     frecuencia_visita_dias = row.get("Frecuencia_Visita_Dias", 30)
     # Normalización de frecuencia: Inversa normalizada
-    # Asegurarse de que frecuencia_visita_dias no sea cero
     if frecuencia_visita_dias == 0:
         frecuencia_norm = 1.0 # Si la frecuencia es 0, score máximo
     else:
@@ -235,6 +231,31 @@ def cluster_clients(df, num_clusters):
     
     return df
 
+def create_my_maps_sheet(df, writer):
+    """
+    Crea la hoja My Maps con formato simplificado para Google My Maps
+    Incluye: nombre, latitud, longitud, cluster
+    """
+    # Filtrar solo clientes geocodificados
+    df_geocoded = df.dropna(subset=["Latitud", "Longitud"]).copy()
+    
+    if len(df_geocoded) == 0:
+        # Si no hay clientes geocodificados, crear hoja vacía con headers
+        my_maps_data = pd.DataFrame(columns=["nombre", "latitud", "longitud", "cluster"])
+    else:
+        # Crear DataFrame simplificado para My Maps
+        my_maps_data = pd.DataFrame({
+            "nombre": df_geocoded["Razón Social"],
+            "latitud": df_geocoded["Latitud"],
+            "longitud": df_geocoded["Longitud"],
+            "cluster": df_geocoded["Cluster"].apply(lambda x: f"Zona {int(x)+1}" if x != -1 else "Sin Zona")
+        })
+    
+    # Guardar en la primera hoja
+    my_maps_data.to_excel(writer, sheet_name="My Maps", index=False)
+    
+    return len(my_maps_data)
+
 def create_dashboard_sheet(df, writer, chart_path):
     total_clientes = len(df)
     venta_total = df["Venta_Total_Anual"].sum()
@@ -259,7 +280,7 @@ def create_dashboard_sheet(df, writer, chart_path):
     for categoria in ["A", "B", "C"]:
         count = abc_counts.get(categoria, 0)
         percentage = (count / total_clientes * 100) if total_clientes > 0 else 0
-        dashboard_data.append([f"Cantidad de Clientes \"{categoria}\"", f"{count} ({percentage:.1f}%)"])
+        dashboard_data.append([f'Cantidad de Clientes "{categoria}"', f"{count} ({percentage:.1f}%)"])
     
     dashboard_data.append(["Total", f"{total_clientes}"])
     dashboard_data.append(["--- Promedios ---", ""])
@@ -274,12 +295,24 @@ def create_dashboard_sheet(df, writer, chart_path):
     if "Score_Prioridad_Final" in df.columns:
         top_5_clientes = df.sort_values(by="Score_Prioridad_Final", ascending=False).head(5)
         for i, (index, row) in enumerate(top_5_clientes.iterrows()):
-            dashboard_data.append([str(i + 1) + ': ' + row['Razón Social'], str(row['Score_Prioridad_Final'])])
+            dashboard_data.append([str(i + 1) + ": " + row["Razón Social"], str(row["Score_Prioridad_Final"])])
     else:
         dashboard_data.append(["N/A: N/A", "N/A"])
 
     dashboard_df = pd.DataFrame(dashboard_data, columns=["Métrica", "Valor"])
     dashboard_df.to_excel(writer, sheet_name="Dashboard", index=False)
+
+def generate_abc_sales_chart(df, chart_path):
+    abc_sales = df.groupby("Categoria_ABC")["Venta_Total_Anual"].sum()
+    if not abc_sales.empty:
+        fig, ax = plt.subplots()
+        abc_sales.plot(kind="bar", ax=ax, color=["red", "orange", "green"])
+        ax.set_title("Ventas por Categoría ABC")
+        ax.set_xlabel("Categoría ABC")
+        ax.set_ylabel("Venta Total Anual")
+        plt.tight_layout()
+        plt.savefig(chart_path)
+        plt.close(fig)
 
 @procesamiento_bp.route("/procesar", methods=["POST"])
 def procesar_datos():
@@ -322,16 +355,15 @@ def procesar_datos():
         
         # Asegurarse de que la columna 'Segmento' exista antes de calcular el Score de Oportunidad
         if 'Segmento' not in df_clasificado.columns:
-            df_clasificado['Segmento'] = 'Otros/Sin datos'
+            df_clasificado["Segmento"] = "Otros/Sin datos"
 
-        # Nuevo: Calcular Score de Oportunidad
+        # Calcular Score de Oportunidad
         df_clasificado["Score_Oportunidad"] = df_clasificado.apply(calcular_score_oportunidad, axis=1)
-
 
         # Geocode addresses (antes de calcular distancia)
         df_geocoded = geocode_addresses(df_clasificado)
         
-        # Nuevo: Calcular Distancia_Desde_Base
+        # Calcular Distancia_Desde_Base
         df_geocoded["Distancia_Desde_Base"] = df_geocoded.apply(
             lambda row: calcular_distancia(BASE_LAT, BASE_LNG, row["Latitud"], row["Longitud"]) 
             if pd.notna(row["Latitud"]) and pd.notna(row["Longitud"]) else None, axis=1
@@ -340,7 +372,7 @@ def procesar_datos():
         # Calcular frecuencia (ahora depende de Score_Oportunidad)
         df_geocoded["Frecuencia_Visita_Dias"] = df_geocoded.apply(calcular_frecuencia_visita, axis=1)
         
-        # Calcular Score de Prioridad Final (ahora usa nueva lógica)
+        # Calcular Score de Prioridad Final
         df_geocoded["Score_Prioridad_Final"] = df_geocoded.apply(calcular_prioridad_final, axis=1)
 
         # Cluster clients
@@ -351,13 +383,11 @@ def procesar_datos():
             chart_path = os.path.join(temp_dir, "abc_sales_chart.png")
             generate_abc_sales_chart(df_clustered, chart_path)
 
-            # Hoja de Dashboard
-            create_dashboard_sheet(df_clustered, writer, chart_path)
+            # 1. Hoja My Maps (PRIMERA PÁGINA) - nombre, latitud, longitud, cluster
+            my_maps_count = create_my_maps_sheet(df_clustered, writer)
+            print(f"Hoja My Maps creada con {my_maps_count} registros geocodificados")
 
-            # Hoja de Datos Unificados
-            df_clustered.to_excel(writer, sheet_name="Datos Unificados", index=False)
-
-            # Hoja de Detalle de Clientes
+            # 2. Hoja de Detalle de Clientes (SEGUNDA PÁGINA)
             df_detalle_clientes = df_clustered[[
                 "Razón Social", "Categoria_ABC", "Score_Oportunidad", 
                 "Score_Prioridad_Final", "Cluster", "Venta_Total_Anual", 
@@ -374,7 +404,13 @@ def procesar_datos():
             }, inplace=True)
             df_detalle_clientes.to_excel(writer, sheet_name="Detalle de Clientes", index=False)
 
-            # Hojas por Cluster
+            # 3. Hoja de Dashboard (TERCERA PÁGINA)
+            create_dashboard_sheet(df_clustered, writer, chart_path)
+
+            # 4. Hoja de Datos Unificados (CUARTA PÁGINA)
+            df_clustered.to_excel(writer, sheet_name="Datos Unificados", index=False)
+
+            # 5. Hojas por Cluster (PÁGINAS SIGUIENTES)
             for cluster_id in sorted(df_clustered["Cluster"].unique()):
                 if cluster_id == -1: # Clientes sin geocodificación
                     sheet_name = "Sin Cluster"
@@ -401,26 +437,6 @@ def procesar_datos():
         return send_file(output_path, as_attachment=True, download_name="resultados_procesados.xlsx")
         
     except Exception as e:
-        print("Error en procesar_datos:", e)
+        print(f"Error en procesar_datos: {str(e)}")
         print(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
-
-def generate_abc_sales_chart(df, output_path):
-    abc_sales = df.groupby("Categoria_ABC")["Venta_Total_Anual"].sum().reindex(["A", "B", "C"], fill_value=0)
-    
-    plt.figure(figsize=(8, 6))
-    abc_sales.plot(kind="bar", color=["green", "orange", "red"])
-    plt.title("Ventas Totales por Categoría ABC")
-    plt.xlabel("Categoría ABC")
-    plt.ylabel("Ventas Totales")
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-
-
-
-
-
-
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
