@@ -602,8 +602,8 @@
             </div>
             <div class="footer-center">
                 <div class="footer-links">
-                     <a href="#">Términos y Condiciones</a>
-                     <a href="#">Política de Privacidad</a>
+                     <a href="/terminos" target="_blank">Términos y Condiciones</a>
+                     <a href="/privacidad" target="_blank">Política de Privacidad</a>
                 </div>
             </div>
             <div class="footer-right">
@@ -647,8 +647,6 @@
                 try {
                     const formData = new FormData(this);
                     
-                    // NOTE: This fetch call is a placeholder for your backend API endpoint.
-                    // You will need to replace "/api/procesar" with your actual API endpoint.
                     const response = await fetch("/api/procesar", {
                         method: "POST",
                         body: formData
