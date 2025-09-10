@@ -8,7 +8,9 @@ import os
 import tempfile
 import matplotlib.pyplot as plt
 import io
-import openpyxl.drawing.image
+import openpyxl
+from openpyxl.styles import NamedStyle, Font, Alignment
+from openpyxl.utils import get_column_letter
 from werkzeug.utils import secure_filename
 import traceback
 
@@ -20,10 +22,114 @@ GEOAPIFY_API_KEY = "65de779bc48c42d8a1208a5f5e9320b4"
 BASE_LAT = -34.6  # Ejemplo: Latitud de Buenos Aires
 BASE_LNG = -58.4  # Ejemplo: Longitud de Buenos Aires
 
+# --- FUNCIÓN DE ESTILOS MEJORADA ---
+def apply_styles_and_autofit(writer, sheet_name, df):
+    """
+    Aplica formato (moneda, decimales, negrita, centrado) y autoajusta el ancho de las columnas
+    a una hoja de Excel específica.
+    """
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+
+    # --- Estilos ---
+    center_alignment = Alignment(horizontal='center', vertical='center')
+    
+    if 'currency' not in workbook.style_names:
+        currency_style = NamedStyle(name='currency', number_format='$ #,##0.00', alignment=center_alignment)
+        workbook.add_named_style(currency_style)
+    if 'decimal' not in workbook.style_names:
+        decimal_style = NamedStyle(name='decimal', number_format='0.00', alignment=center_alignment)
+        workbook.add_named_style(decimal_style)
+    if 'default_center' not in workbook.style_names:
+        default_center_style = NamedStyle(name='default_center', alignment=center_alignment)
+        workbook.add_named_style(default_center_style)
+
+    bold_font = Font(bold=True)
+    header_font = Font(bold=True)
+    
+    # Aplicar estilo al encabezado
+    for cell in worksheet[1]:
+        cell.font = header_font
+        cell.alignment = center_alignment
+    
+    # --- Mapeo de columnas a estilos ---
+    style_map = {
+        'Venta Total Anual': 'currency',
+        'Score Oportunidad': 'decimal',
+        'Score Prioridad': 'decimal',
+        'Distancia Base (km)': 'decimal',
+        'Latitud': 'decimal',
+        'Longitud': 'decimal'
+    }
+    month_cols = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic", "Importe PS", "IMPORTE"]
+
+    # Aplicar estilos a las celdas de datos
+    for r_idx in range(2, worksheet.max_row + 1):
+        for c_idx in range(1, worksheet.max_column + 1):
+            cell = worksheet.cell(row=r_idx, column=c_idx)
+            column_name = df.columns[c_idx - 1]
+            
+            # Aplicar estilo por defecto (centrado)
+            cell.style = 'default_center'
+
+            # Poner en negrita los nombres de cliente
+            if column_name in ['Cliente', 'Razón Social', 'nombre']:
+                cell.font = bold_font
+
+            # Aplicar estilos de número específicos
+            if column_name in style_map:
+                cell.style = style_map[column_name]
+            elif column_name in month_cols:
+                cell.style = 'currency'
+
+    # Autoajustar el ancho de las columnas
+    for column_cells in worksheet.columns:
+        max_length = 0
+        column = get_column_letter(column_cells[0].column)
+        for cell in column_cells:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        worksheet.column_dimensions[column].width = adjusted_width
+
+
+# --- NUEVA FUNCIÓN DE ESTILO EXCLUSIVA PARA EL DASHBOARD ---
+def style_dashboard_sheet(writer, sheet_name):
+    """Aplica formato específico a la hoja de Dashboard."""
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+    bold_font = Font(bold=True)
+    center_alignment = Alignment(horizontal='center', vertical='center')
+
+    titles_to_bold = [
+        "ESTADÍSTICAS GENERALES", "--- Distribución de Clientes ---",
+        "--- Promedios ---", "TOP 5 CLIENTES POR PRIORIZACIÓN"
+    ]
+    
+    # Poner títulos en negrita y centrar todo
+    for row in worksheet.iter_rows():
+        for cell in row:
+            if cell.value in titles_to_bold:
+                cell.font = bold_font
+            cell.alignment = center_alignment # Centrar todas las celdas del dashboard
+
+    # Autoajustar columnas del dashboard
+    for column_cells in worksheet.columns:
+        max_length = 0
+        column = get_column_letter(column_cells[0].column)
+        for cell in column_cells:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        worksheet.column_dimensions[column].width = max_length + 2
+
+
 def geocode_address_geoapify(address):
     url = f"https://api.geoapify.com/v1/geocode/search?text={address}&apiKey={GEOAPIFY_API_KEY}"
     try:
-        response = requests.get(url )
+        response = requests.get(url)
         response.raise_for_status()
         data = response.json()
         if data and data["features"]:
@@ -48,13 +154,12 @@ def geocode_addresses(df):
     latitudes = []
     longitudes = []
     
-    total_addresses = len(df)
     for index, row in df.iterrows():
         address = row["Direccion_Completa"]
         lat, lon = geocode_address_geoapify(address)
         latitudes.append(lat)
         longitudes.append(lon)
-        time.sleep(0.1)  # Rate limiting
+        time.sleep(0.1)
     
     df["Latitud"] = latitudes
     df["Longitud"] = longitudes
@@ -106,52 +211,30 @@ def clasificar_abc(df):
 
 def calcular_score_oportunidad(row):
     score = 0
-
-    # Factor 1: Categoría ABC (40%)
     categoria_abc = row.get("Categoria_ABC", "C")
-    if categoria_abc == "A":
-        score += 40
-    elif categoria_abc == "B":
-        score += 25
-    elif categoria_abc == "C":
-        score += 10
+    if categoria_abc == "A": score += 40
+    elif categoria_abc == "B": score += 25
+    else: score += 10
 
-    # Factor 2: Segmento (30%)
     segmento = row.get("Segmento", "Otros/Sin datos")
-    if segmento == "Distribuidor A":
-        score += 30
-    elif segmento == "Distribuidor B":
-        score += 25
-    elif segmento == "Mostrador A":
-        score += 20
-    elif segmento == "Mostrador B":
-        score += 15
-    else:
-        score += 10
+    if segmento == "Distribuidor A": score += 30
+    elif segmento == "Distribuidor B": score += 25
+    elif segmento == "Mostrador A": score += 20
+    elif segmento == "Mostrador B": score += 15
+    else: score += 10
 
-    # Factor 3: Rubro (20%)
     rubro = row.get("Rubro", "Otros")
-    if rubro == "Industrial":
-        score += 20
-    elif rubro == "Eléctrico":
-        score += 18
-    elif rubro == "Ferretero":
-        score += 15
-    elif rubro == "Repuestero":
-        score += 12
-    else:
-        score += 10
+    if rubro == "Industrial": score += 20
+    elif rubro == "Eléctrico": score += 18
+    elif rubro == "Ferretero": score += 15
+    elif rubro == "Repuestero": score += 12
+    else: score += 10
 
-    # Factor 4: Volumen de Ventas (10%)
     venta_total = row.get("Venta_Total_Anual", 0)
-    if venta_total >= 10000000:
-        score += 10
-    elif venta_total >= 5000000:
-        score += 8
-    elif venta_total >= 1000000:
-        score += 6
-    else:
-        score += 3
+    if venta_total >= 10000000: score += 10
+    elif venta_total >= 5000000: score += 8
+    elif venta_total >= 1000000: score += 6
+    else: score += 3
 
     return score
 
@@ -160,53 +243,37 @@ def calcular_frecuencia_visita(row):
     score_oportunidad = row.get("Score_Oportunidad", 0)
 
     if categoria == "A":
-        if score_oportunidad >= 80:
-            return 7  # Semanal
-        else:
-            return 14 # Quincenal
+        return 7 if score_oportunidad >= 80 else 14
     elif categoria == "B":
-        return 21 # Cada 3 semanas
-    else: # C
-        return 30 # Mensual
+        return 21
+    else:
+        return 30
 
 def calcular_distancia(lat1, lng1, lat2, lng2):
-    R = 6371 # Radio de la Tierra en km
+    R = 6371
     dlat = math.radians(lat2 - lat1)
     dlng = math.radians(lng2 - lng1)
-
-    a = (math.sin(dlat/2) * math.sin(dlat/2) +
+    a = (math.sin(dlat/2)**2 +
          math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
-         math.sin(dlng/2) * math.sin(dlng/2))
+         math.sin(dlng/2)**2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    distancia = R * c
-    return distancia
+    return R * c
 
 def calcular_prioridad_final(row):
-    score_oportunidad_norm = row.get("Score_Oportunidad", 0) / 100  # Normalizado 0-1
+    score_oportunidad_norm = row.get("Score_Oportunidad", 0) / 100
     
-    # Asegurarse de que Latitud y Longitud existan antes de calcular distancia
     if pd.isna(row.get("Latitud")) or pd.isna(row.get("Longitud")):
-        distancia_desde_base = 999999 # Asignar un valor muy alto si no hay coordenadas
+        distancia_desde_base = 999999
     else:
         distancia_desde_base = calcular_distancia(BASE_LAT, BASE_LNG, row["Latitud"], row["Longitud"])
 
-    # Normalización de distancia: Inversa normalizada
-    if distancia_desde_base == 0:
-        distancia_norm = 1.0 # Si está en la base, score máximo
-    else:
-        distancia_norm = 1 / (1 + distancia_desde_base / 10)
-
+    distancia_norm = 1.0 if distancia_desde_base == 0 else 1 / (1 + distancia_desde_base / 10)
     frecuencia_visita_dias = row.get("Frecuencia_Visita_Dias", 30)
-    # Normalización de frecuencia: Inversa normalizada
-    if frecuencia_visita_dias == 0:
-        frecuencia_norm = 1.0 # Si la frecuencia es 0, score máximo
-    else:
-        frecuencia_norm = 1 / (frecuencia_visita_dias / 30)
+    frecuencia_norm = 1.0 if frecuencia_visita_dias == 0 else 1 / (frecuencia_visita_dias / 30)
 
-    # Pesos según el PDF
-    peso_oportunidad = 0.5 # 50%
-    peso_distancia = 0.2 # 20%
-    peso_frecuencia = 0.3 # 30%
+    peso_oportunidad = 0.5
+    peso_distancia = 0.2
+    peso_frecuencia = 0.3
 
     score_final = (score_oportunidad_norm * peso_oportunidad +
                    distancia_norm * peso_distancia +
@@ -223,7 +290,6 @@ def cluster_clients(df, num_clusters):
     if len(df_valid) > 0:
         kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
         df_valid["Cluster"] = kmeans.fit_predict(df_valid[["Latitud", "Longitud"]])
-        
         df = df.merge(df_valid[["Razón Social", "Cluster"]], on="Razón Social", how="left")
         df["Cluster"] = df["Cluster"].fillna(-1)
     else:
@@ -232,18 +298,11 @@ def cluster_clients(df, num_clusters):
     return df
 
 def create_my_maps_sheet(df, writer):
-    """
-    Crea la hoja My Maps con formato simplificado para Google My Maps
-    Incluye: nombre, latitud, longitud, cluster
-    """
-    # Filtrar solo clientes geocodificados
     df_geocoded = df.dropna(subset=["Latitud", "Longitud"]).copy()
     
-    if len(df_geocoded) == 0:
-        # Si no hay clientes geocodificados, crear hoja vacía con headers
+    if df_geocoded.empty:
         my_maps_data = pd.DataFrame(columns=["nombre", "latitud", "longitud", "cluster"])
     else:
-        # Crear DataFrame simplificado para My Maps
         my_maps_data = pd.DataFrame({
             "nombre": df_geocoded["Razón Social"],
             "latitud": df_geocoded["Latitud"],
@@ -251,75 +310,52 @@ def create_my_maps_sheet(df, writer):
             "cluster": df_geocoded["Cluster"].apply(lambda x: f"Zona {int(x)+1}" if x != -1 else "Sin Zona")
         })
     
-    # Guardar en la primera hoja
     my_maps_data.to_excel(writer, sheet_name="My Maps", index=False)
-    
+    apply_styles_and_autofit(writer, "My Maps", my_maps_data)
     return len(my_maps_data)
 
-def create_dashboard_sheet(df, writer, chart_path):
+def create_dashboard_sheet(df, writer):
     total_clientes = len(df)
-    venta_total = df["Venta_Total_Anual"].sum()
-    
     abc_counts = df["Categoria_ABC"].value_counts()
-    abc_sales = df.groupby("Categoria_ABC")["Venta_Total_Anual"].sum()
     
     score_oportunidad_promedio = df["Score_Oportunidad"].mean() if "Score_Oportunidad" in df.columns else 0
     score_prioridad_promedio = df["Score_Prioridad_Final"].mean() if "Score_Prioridad_Final" in df.columns else 0
     
-    # Calcular distancia promedio solo para clientes geocodificados
     df_geocoded_only = df.dropna(subset=["Latitud", "Longitud"])
     distancia_promedio = df_geocoded_only["Distancia_Desde_Base"].mean() if "Distancia_Desde_Base" in df_geocoded_only.columns else 0
 
-    dashboard_data = []
-    
-    dashboard_data.append(["ESTADÍSTICAS GENERALES", ""])
-    dashboard_data.append(["", ""])
-    dashboard_data.append(["Métrica", "Valor"])
-    dashboard_data.append(["--- Distribución de Clientes ---", ""])
+    dashboard_data = [
+        ["ESTADÍSTICAS GENERALES", ""], [""], ["Métrica", "Valor"],
+        ["--- Distribución de Clientes ---", ""]
+    ]
     
     for categoria in ["A", "B", "C"]:
         count = abc_counts.get(categoria, 0)
         percentage = (count / total_clientes * 100) if total_clientes > 0 else 0
         dashboard_data.append([f'Cantidad de Clientes "{categoria}"', f"{count} ({percentage:.1f}%)"])
     
-    dashboard_data.append(["Total", f"{total_clientes}"])
-    dashboard_data.append(["--- Promedios ---", ""])
-    dashboard_data.append(["Score de Oportunidad Promedio", f"{score_oportunidad_promedio:.1f}"])
-    dashboard_data.append(["Score de Prioridad Promedio", f"{score_prioridad_promedio:.1f}"])
-    dashboard_data.append(["Distancia Promedio (km)", f"{distancia_promedio:.1f}"])
-    
-    # Top 5 Clientes por Priorización
-    dashboard_data.append(["", ""])
-    dashboard_data.append(["TOP 5 CLIENTES POR PRIORIZACIÓN", ""])
-    dashboard_data.append(["Posición: Razón Social", "Score Prioridad Final"])
+    dashboard_data.extend([
+        ["Total", f"{total_clientes}"], ["--- Promedios ---", ""],
+        ["Score de Oportunidad Promedio", f"{score_oportunidad_promedio:.1f}"],
+        ["Score de Prioridad Promedio", f"{score_prioridad_promedio:.1f}"],
+        ["Distancia Promedio (km)", f"{distancia_promedio:.1f}"], [""],
+        ["TOP 5 CLIENTES POR PRIORIZACIÓN", ""], ["Posición: Razón Social", "Score Prioridad Final"]
+    ])
+
     if "Score_Prioridad_Final" in df.columns:
         top_5_clientes = df.sort_values(by="Score_Prioridad_Final", ascending=False).head(5)
         for i, (index, row) in enumerate(top_5_clientes.iterrows()):
-            dashboard_data.append([str(i + 1) + ": " + row["Razón Social"], str(row["Score_Prioridad_Final"])])
-    else:
-        dashboard_data.append(["N/A: N/A", "N/A"])
-
+            dashboard_data.append([f"{i+1}: {row['Razón Social']}", f"{row['Score_Prioridad_Final']:.2f}"])
+    
     dashboard_df = pd.DataFrame(dashboard_data, columns=["Métrica", "Valor"])
     dashboard_df.to_excel(writer, sheet_name="Dashboard", index=False)
+    
+    # Llamar a la nueva función de estilo para el dashboard
+    style_dashboard_sheet(writer, "Dashboard")
 
-def generate_abc_sales_chart(df, chart_path):
-    abc_sales = df.groupby("Categoria_ABC")["Venta_Total_Anual"].sum()
-    if not abc_sales.empty:
-        fig, ax = plt.subplots()
-        abc_sales.plot(kind="bar", ax=ax, color=["red", "orange", "green"])
-        ax.set_title("Ventas por Categoría ABC")
-        ax.set_xlabel("Categoría ABC")
-        ax.set_ylabel("Venta Total Anual")
-        plt.tight_layout()
-        plt.savefig(chart_path)
-        plt.close(fig)
 
 @procesamiento_bp.route("/procesar", methods=["POST"])
 def procesar_datos():
-    print("\n--- Inicio de procesar_datos ---")
-    print(f"Método de solicitud: {request.method}")
-    print(f"Archivos recibidos: {list(request.files.keys())}")
-    print(f"Datos de formulario recibidos: {list(request.form.keys())}")
     try:
         if "archivo_clientes" not in request.files or "archivo_ventas" not in request.files:
             return jsonify({"error": "Faltan archivos"}), 400
@@ -333,106 +369,76 @@ def procesar_datos():
         
         temp_dir = tempfile.mkdtemp()
         
-        clientes_path = os.path.join(temp_dir, secure_filename(archivo_clientes.filename))
-        ventas_path = os.path.join(temp_dir, secure_filename(archivo_ventas.filename))
-        
-        archivo_clientes.save(clientes_path)
-        archivo_ventas.save(ventas_path)
-        
-        df_clientes = pd.read_excel(clientes_path)
-        df_ventas = pd.read_excel(ventas_path, sheet_name="MIX POR CLIENTE")
+        df_clientes = pd.read_excel(archivo_clientes)
+        df_ventas = pd.read_excel(archivo_ventas, sheet_name="MIX POR CLIENTE")
         
         if "Unnamed: 0" in df_ventas.columns:
             df_ventas = df_ventas.rename(columns={"Unnamed: 0": "Cliente"})
         
-        print("Columnas de df_clientes después de la lectura:", df_clientes.columns.tolist())
-        print("Columnas de df_ventas después de la lectura:", df_ventas.columns.tolist())
-        
         df_unificado = unify_data(df_clientes, df_ventas)
-        print("Columnas de df_unificado después de unify_data:", df_unificado.columns.tolist())
-        
         df_clasificado = clasificar_abc(df_unificado)
         
-        # Asegurarse de que la columna 'Segmento' exista antes de calcular el Score de Oportunidad
         if 'Segmento' not in df_clasificado.columns:
             df_clasificado["Segmento"] = "Otros/Sin datos"
 
-        # Calcular Score de Oportunidad
         df_clasificado["Score_Oportunidad"] = df_clasificado.apply(calcular_score_oportunidad, axis=1)
-
-        # Geocode addresses (antes de calcular distancia)
         df_geocoded = geocode_addresses(df_clasificado)
         
-        # Calcular Distancia_Desde_Base
         df_geocoded["Distancia_Desde_Base"] = df_geocoded.apply(
             lambda row: calcular_distancia(BASE_LAT, BASE_LNG, row["Latitud"], row["Longitud"]) 
             if pd.notna(row["Latitud"]) and pd.notna(row["Longitud"]) else None, axis=1
         )
 
-        # Calcular frecuencia (ahora depende de Score_Oportunidad)
         df_geocoded["Frecuencia_Visita_Dias"] = df_geocoded.apply(calcular_frecuencia_visita, axis=1)
-        
-        # Calcular Score de Prioridad Final
         df_geocoded["Score_Prioridad_Final"] = df_geocoded.apply(calcular_prioridad_final, axis=1)
-
-        # Cluster clients
         df_clustered = cluster_clients(df_geocoded, num_clusters)
         
         output_path = os.path.join(temp_dir, "resultados.xlsx")
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            chart_path = os.path.join(temp_dir, "abc_sales_chart.png")
-            generate_abc_sales_chart(df_clustered, chart_path)
+            # 1. Hoja My Maps
+            create_my_maps_sheet(df_clustered, writer)
 
-            # 1. Hoja My Maps (PRIMERA PÁGINA) - nombre, latitud, longitud, cluster
-            my_maps_count = create_my_maps_sheet(df_clustered, writer)
-            print(f"Hoja My Maps creada con {my_maps_count} registros geocodificados")
-
-            # 2. Hoja de Detalle de Clientes (SEGUNDA PÁGINA)
+            # 2. Hoja de Detalle de Clientes
             df_detalle_clientes = df_clustered[[
                 "Razón Social", "Categoria_ABC", "Score_Oportunidad", 
                 "Score_Prioridad_Final", "Cluster", "Venta_Total_Anual", 
                 "Frecuencia_Visita_Dias", "Distancia_Desde_Base", "Latitud", "Longitud"
             ]].copy()
             df_detalle_clientes.rename(columns={
-                "Razón Social": "Cliente",
-                "Categoria_ABC": "Categoría ABC",
-                "Score_Oportunidad": "Score Oportunidad",
-                "Score_Prioridad_Final": "Score Prioridad",
-                "Venta_Total_Anual": "Venta Total Anual",
-                "Frecuencia_Visita_Dias": "Frecuencia Visita (días)",
+                "Razón Social": "Cliente", "Categoria_ABC": "Categoría ABC",
+                "Score_Oportunidad": "Score Oportunidad", "Score_Prioridad_Final": "Score Prioridad",
+                "Venta_Total_Anual": "Venta Total Anual", "Frecuencia_Visita_Dias": "Frecuencia Visita (días)",
                 "Distancia_Desde_Base": "Distancia Base (km)"
             }, inplace=True)
             df_detalle_clientes.to_excel(writer, sheet_name="Detalle de Clientes", index=False)
+            apply_styles_and_autofit(writer, "Detalle de Clientes", df_detalle_clientes)
 
-            # 3. Hoja de Dashboard (TERCERA PÁGINA)
-            create_dashboard_sheet(df_clustered, writer, chart_path)
+            # 3. Hoja de Dashboard
+            create_dashboard_sheet(df_clustered, writer)
 
-            # 4. Hoja de Datos Unificados (CUARTA PÁGINA)
-            df_clustered.to_excel(writer, sheet_name="Datos Unificados", index=False)
+            # 4. Hoja de Datos Unificados
+            df_unificado_formateado = df_clustered.rename(columns={"Razón Social": "Cliente"})
+            df_unificado_formateado.to_excel(writer, sheet_name="Datos Unificados", index=False)
+            apply_styles_and_autofit(writer, "Datos Unificados", df_unificado_formateado)
 
-            # 5. Hojas por Cluster (PÁGINAS SIGUIENTES)
+            # 5. Hojas por Cluster
             for cluster_id in sorted(df_clustered["Cluster"].unique()):
-                if cluster_id == -1: # Clientes sin geocodificación
-                    sheet_name = "Sin Cluster"
-                else:
-                    sheet_name = f"Cluster {int(cluster_id)}"
+                sheet_name = "Sin Cluster" if cluster_id == -1 else f"Cluster {int(cluster_id) + 1}"
                 
                 df_cluster = df_clustered[df_clustered["Cluster"] == cluster_id].sort_values(by="Score_Prioridad_Final", ascending=False)
                 df_cluster_display = df_cluster[[
                     "Razón Social", "Categoria_ABC", "Score_Oportunidad", 
-                    "Score_Prioridad_Final", "Cluster", "Venta_Total_Anual", 
+                    "Score_Prioridad_Final", "Venta_Total_Anual", 
                     "Frecuencia_Visita_Dias", "Distancia_Desde_Base"
                 ]].copy()
                 df_cluster_display.rename(columns={
-                    "Razón Social": "Cliente",
-                    "Categoria_ABC": "Categoría ABC",
-                    "Score_Oportunidad": "Score Oportunidad",
-                    "Score_Prioridad_Final": "Score Prioridad",
-                    "Venta_Total_Anual": "Venta Total Anual",
-                    "Frecuencia_Visita_Dias": "Frecuencia Visita (días)",
+                    "Razón Social": "Cliente", "Categoria_ABC": "Categoría ABC",
+                    "Score_Oportunidad": "Score Oportunidad", "Score_Prioridad_Final": "Score Prioridad",
+                    "Venta_Total_Anual": "Venta Total Anual", "Frecuencia_Visita_Dias": "Frecuencia Visita (días)",
                     "Distancia_Desde_Base": "Distancia Base (km)"
                 }, inplace=True)
                 df_cluster_display.to_excel(writer, sheet_name=sheet_name, index=False)
+                apply_styles_and_autofit(writer, sheet_name, df_cluster_display)
 
         return send_file(output_path, as_attachment=True, download_name="resultados_procesados.xlsx")
         
@@ -440,3 +446,4 @@ def procesar_datos():
         print(f"Error en procesar_datos: {str(e)}")
         print(traceback.format_exc())
         return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
